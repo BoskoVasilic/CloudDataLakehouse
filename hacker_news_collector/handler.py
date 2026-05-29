@@ -12,26 +12,19 @@ logger.setLevel(logging.INFO)
 
 S3_BUCKET = os.environ["BRONZE_BUCKET_NAME"]
 HN_SEARCH_BASE = "https://hn.algolia.com/api/v1/search"
+HN_TAGS = "(story,ask_hn,comment,job,poll)"
 
-ITEM_TYPES = ["story", "ask_hn", "comment", "job", "poll"]
-
-
-def get_date_range_timestamps():
-    today_utc = datetime.now(timezone.utc).date()
-    yesterday = today_utc - timedelta(days=1)
-
-    start_dt = datetime(yesterday.year, yesterday.month, yesterday.day, 0, 0, 0, tzinfo=timezone.utc)
-    end_dt = datetime(yesterday.year, yesterday.month, yesterday.day, 23, 59, 59, tzinfo=timezone.utc)
-
-    return int(start_dt.timestamp()), int(end_dt.timestamp()), yesterday
+ALGOLIA_MAX_HITS = 1000
+MIN_INTERVAL_SECONDS = 1800
+INITIAL_INTERVAL_HOURS = 3
 
 
-def fetch_hn_page(item_type: str, timestamp_from: int, timestamp_to: int, page: int) -> dict:
+def fetch_hn(ts_from: int, ts_to: int) -> dict:
     params = urllib.parse.urlencode({
-        "tags": item_type,
-        "numericFilters": f"created_at_i>{timestamp_from},created_at_i<{timestamp_to}",
-        "hitsPerPage": 1000,
-        "page": page,
+        "tags": HN_TAGS,
+        "numericFilters": f"created_at_i>={ts_from},created_at_i<{ts_to}",
+        "hitsPerPage": ALGOLIA_MAX_HITS,
+        "page": 0,
     })
     url = f"{HN_SEARCH_BASE}?{params}"
     logger.info(f"Fetching: {url}")
@@ -41,37 +34,26 @@ def fetch_hn_page(item_type: str, timestamp_from: int, timestamp_to: int, page: 
         return json.loads(response.read().decode("utf-8"))
 
 
-def collect_all_items_for_type(item_type: str, ts_from: int, ts_to: int) -> list:
-    all_items = []
-    page = 0
+def collect_interval(ts_from: int, ts_to: int, all_hits: list) -> None:
+    response = fetch_hn(ts_from, ts_to)
+    hits = response.get("hits", [])
 
-    while True:
-        data = fetch_hn_page(item_type, ts_from, ts_to, page)
-        hits = data.get("hits", [])
-        all_items.extend(hits)
+    interval_size = ts_to - ts_from
 
-        logger.info(
-            f"Type={item_type} | Page={page} | Hits on page={len(hits)} | "
-            f"Total so far={len(all_items)} | NbPages={data.get('nbPages', 0)}"
-        )
+    if len(hits) == ALGOLIA_MAX_HITS and interval_size > MIN_INTERVAL_SECONDS:
+        mid = ts_from + interval_size // 2
+        collect_interval(ts_from, mid, all_hits)
+        collect_interval(mid, ts_to, all_hits)
+    else:
+        all_hits.extend(hits)
 
-        if page >= data.get("nbPages", 1) - 1:
-            break
-        page += 1
-
-    return all_items
-
-
-def save_to_s3(items: list, item_type: str, date_str: str) -> str:
+def save_to_s3(hits: list, date_str: str) -> str:
     s3_client = boto3.client("s3")
 
     year, month, day = date_str.split("-")
-    s3_key = (
-        f"bronze/hacker_news/{item_type}/"
-        f"year={year}/month={month}/day={day}/data.json"
-    )
+    s3_key = f"bronze/hacker_news/year={year}/month={month}/day={day}/data.json"
 
-    body = "\n".join(json.dumps(item, ensure_ascii=False) for item in items)
+    body = json.dumps(hits, ensure_ascii=False)
 
     s3_client.put_object(
         Bucket=S3_BUCKET,
@@ -80,49 +62,44 @@ def save_to_s3(items: list, item_type: str, date_str: str) -> str:
         ContentType="application/json",
         Metadata={
             "source": "hacker_news",
-            "item_type": item_type,
             "collection_date": date_str,
-            "item_count": str(len(items)),
+            "hit_count": str(len(hits)),
         },
     )
 
-    logger.info(f"Saved {len(items)} items to s3://{S3_BUCKET}/{s3_key}")
+    logger.info(f"Saved {len(hits)} hits to s3://{S3_BUCKET}/{s3_key}")
     return s3_key
 
 
 def lambda_handler(event, context):
     logger.info("Starting Hacker News Bronze Layer collection")
 
-    ts_from, ts_to, yesterday = get_date_range_timestamps()
-    date_str = str(yesterday)  # format: YYYY-MM-DD
-    logger.info(f"Collecting data for date: {date_str} | ts_from={ts_from} | ts_to={ts_to}")
+    today_utc = datetime.now(timezone.utc).date()
+    yesterday = today_utc - timedelta(days=1)
+    date_str = str(yesterday)
 
-    summary = {}
-    errors = []
+    day_start = datetime(yesterday.year, yesterday.month, yesterday.day, 0, 0, 0, tzinfo=timezone.utc)
+    day_end = datetime(yesterday.year, yesterday.month, yesterday.day, 23, 59, 59, tzinfo=timezone.utc)
 
-    for item_type in ITEM_TYPES:
-        try:
-            items = collect_all_items_for_type(item_type, ts_from, ts_to)
-            if items:
-                s3_key = save_to_s3(items, item_type, date_str)
-                summary[item_type] = {"count": len(items), "s3_key": s3_key}
-            else:
-                logger.info(f"No items found for type={item_type} on {date_str}")
-                summary[item_type] = {"count": 0, "s3_key": None}
-        except Exception as e:
-            logger.error(f"Error collecting type={item_type}: {str(e)}", exc_info=True)
-            errors.append({"item_type": item_type, "error": str(e)})
+    interval_seconds = INITIAL_INTERVAL_HOURS * 3600
+    all_hits = []
+
+    ts = int(day_start.timestamp())
+    day_end_ts = int(day_end.timestamp())
+
+    while ts < day_end_ts:
+        ts_to = min(ts + interval_seconds, day_end_ts)
+        collect_interval(ts, ts_to, all_hits)
+        ts = ts_to
+
+    s3_key = save_to_s3(all_hits, date_str)
 
     result = {
-        "status": "completed" if not errors else "completed_with_errors",
+        "status": "completed",
         "collection_date": date_str,
-        "summary": summary,
-        "errors": errors,
+        "total_hits": len(all_hits),
+        "s3_key": s3_key,
     }
 
     logger.info(f"Collection finished: {json.dumps(result)}")
-
-    if errors:
-        raise RuntimeError(f"Errors during collection: {json.dumps(errors)}")
-
     return result
