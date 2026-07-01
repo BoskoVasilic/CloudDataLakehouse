@@ -1,4 +1,6 @@
 aws-cdk-lib==2.142.1
 constructs>=10.0.0,<11.0.0
+pandas==3.0.3
+awswrangler==3.17.0
 
 boto3
