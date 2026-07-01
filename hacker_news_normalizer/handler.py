@@ -152,6 +152,7 @@ def build_dataframes(hits: list, karma_map: dict, date_str: str) -> tuple[pd.Dat
                 "platform": "HackerNews",
                 "karma_score": user_karma_data.get("karma_score"),
                 "is_verified": None,
+                "followers_count": None,
                 "created_at": user_karma_data.get("created_at"),
             }
 
@@ -200,6 +201,7 @@ def cast_types(df_users: pd.DataFrame, df_posts: pd.DataFrame) -> tuple[pd.DataF
     df_users["platform"]    = df_users["platform"].astype("string")
     df_users["karma_score"] = pd.array(df_users["karma_score"], dtype=pd.Int64Dtype())
     df_users["is_verified"] = df_users["is_verified"].astype(object)
+    df_users["followers_count"] = df_users["followers_count"].astype(object)
     df_users["created_at"]  = df_users["created_at"].astype("string")
 
     df_posts["post_id"]         = df_posts["post_id"].astype("string")
