@@ -53,8 +53,9 @@ def safe_day(dt_series: pd.Series) -> pd.Series:
 def process_chunk(chunk: pd.DataFrame):
     global seen_usernames
 
+    # --- USERS ---
     users = (
-        chunk[["user_name", "user_created", "user_verified"]]
+        chunk[["user_name", "user_created", "user_verified", "user_followers"]]
         .drop_duplicates(subset=["user_name"])
         .copy()
     )
@@ -65,24 +66,33 @@ def process_chunk(chunk: pd.DataFrame):
         seen_usernames.update(users["user_name"].tolist())
 
         created_dt = parse_date_series(users["user_created"])
-
-        # Izbaci vrednosti pre 2006 (Twitter nije postojao) i null/sentinel vrednosti
         valid_created = created_dt.apply(
             lambda x: x if pd.notna(x) and x.year >= 2006 else pd.NaT
         )
 
         users["created_at"] = valid_created.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        users = users.rename(columns={"user_name": "username", "user_verified": "is_verified"})
+        users = users.rename(columns={
+            "user_name": "username",
+            "user_verified": "is_verified",
+            "user_followers": "followers_count",
+        })
         users["is_verified"] = (
             users["is_verified"].astype(str).str.strip().str.upper()
             .map({"TRUE": True, "FALSE": False})
         )
+        users["followers_count"] = pd.to_numeric(users["followers_count"], errors="coerce").astype("Int64")
         users["user_id"] = [str(uuid.uuid4()) for _ in range(len(users))]
         users["platform"] = "X"
-        users = users[["user_id", "username", "platform", "is_verified", "created_at"]]
+        users["karma_score"] = pd.array([None] * len(users), dtype=pd.Int64Dtype())
+
+        users = users[[
+            "user_id", "username", "platform",
+            "karma_score", "is_verified", "followers_count", "created_at"
+        ]]
     else:
         users = None
 
+    # --- POSTS ---
     posts = chunk[["user_name", "date", "text", "is_retweet"]].copy()
     created_at_dt = parse_date_series(posts["date"])
 
@@ -91,7 +101,6 @@ def process_chunk(chunk: pd.DataFrame):
     posts["month"] = safe_month(created_at_dt)
     posts["day"]   = safe_day(created_at_dt)
 
-    # Izbaci redove sa nevazecim godinama (pre 2006, NaT)
     posts = posts[posts["year"].apply(lambda x: x is not None and int(x) >= 2006)]
 
     posts["post_type"] = np.where(
@@ -102,8 +111,13 @@ def process_chunk(chunk: pd.DataFrame):
         posts["user_name"].astype(str) + "_" + posts["created_at"].astype(str)
     ).apply(hash).abs().astype(str)
     posts = posts.rename(columns={"user_name": "author_username"})
+    posts["points"] = pd.array([None] * len(posts), dtype=pd.Int64Dtype())
+
     posts = posts.drop_duplicates(subset=["author_username", "content_text", "created_at"])
-    posts = posts[["post_id", "author_username", "content_text", "created_at", "post_type", "year", "month", "day"]]
+    posts = posts[[
+        "post_id", "author_username", "content_text",
+        "created_at", "post_type", "points", "year", "month", "day"
+    ]]
 
     return users, posts
 
@@ -114,7 +128,7 @@ def lambda_handler(event, context):
 
     logger.info("Pokrenut Twitter Silver normalizer")
 
-    wr.s3.delete_objects(PATH_USERS)
+    wr.s3.delete_objects(f"{PATH_USERS}platform=X/")
     wr.s3.delete_objects(PATH_POSTS)
 
     logger.info(f"Preuzimam s3://{S3_BUCKET}/{BRONZE_KEY} na {TMP_CSV}")
