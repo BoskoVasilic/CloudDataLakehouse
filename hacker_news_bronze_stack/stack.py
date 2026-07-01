@@ -84,6 +84,14 @@ class DataCollectionStack(Stack):
             actions=["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
             resources=[f"{bronze_bucket.bucket_arn}/silver/*"],
         ))
+
+        silver_lambda_role.add_to_policy(iam.PolicyStatement(
+            sid="AllowGoldDQWrite",
+            effect=iam.Effect.ALLOW,
+            actions=["s3:PutObject", "s3:DeleteObject"],
+            resources=[f"{bronze_bucket.bucket_arn}/gold/hacker_news/*"],
+        ))
+
         silver_lambda_role.add_to_policy(iam.PolicyStatement(
             sid="AllowSilverList",
             effect=iam.Effect.ALLOW,
