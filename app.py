@@ -2,6 +2,7 @@
 import aws_cdk as cdk
 from hacker_news_bronze_stack.stack import DataCollectionStack
 from twitter_silver_stack.stack import TwitterSilverStack
+from twitter_gold_stack.stack import TwitterGoldStack
 
 app = cdk.App()
 
@@ -15,5 +16,12 @@ TwitterSilverStack(
     "TwitterSilverStack",
     bronze_bucket_name=f"data-lake-bucket-{cdk.Aws.ACCOUNT_ID}-{cdk.Aws.REGION}",
 )
+
+TwitterGoldStack(
+    app,
+    "TwitterGoldStack",
+    bronze_bucket_name=f"data-lake-bucket-{cdk.Aws.ACCOUNT_ID}-{cdk.Aws.REGION}",
+)
+
 
 app.synth()
