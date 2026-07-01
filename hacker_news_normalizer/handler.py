@@ -20,6 +20,7 @@ SILVER_BUCKET = os.environ["SILVER_BUCKET_NAME"]
 
 SILVER_USERS_PATH = f"s3://{SILVER_BUCKET}/silver/users/"
 SILVER_POSTS_PATH = f"s3://{SILVER_BUCKET}/silver/posts/"
+GOLD_DQ_PATH = f"s3://{SILVER_BUCKET}/gold/hacker_news/data_quality_score/"
 
 HN_USER_API = "https://hacker-news.firebaseio.com/v0/user/{username}.json"
 
@@ -241,6 +242,42 @@ def save_to_silver(df_users: pd.DataFrame, df_posts: pd.DataFrame):
         logger.info("Posts written successfully")
 
 
+def save_data_quality_score(df_users: pd.DataFrame, df_posts: pd.DataFrame, date_str: str):
+    dq_rows = []
+
+    for col in ["created_at", "content_text", "post_type"]:
+        total = len(df_posts)
+        valid = int(df_posts[col].notna().sum())
+        dq_rows.append({
+            "date": date_str,
+            "metric_name": f"posts_{col}",
+            "total_rows": total,
+            "valid_rows": valid,
+            "quality_pct": round(valid / total * 100, 2) if total > 0 else 0.0,
+        })
+
+    for col in ["karma_score", "created_at"]:
+        total = len(df_users)
+        valid = int(df_users[col].notna().sum())
+        dq_rows.append({
+            "date": date_str,
+            "metric_name": f"users_{col}",
+            "total_rows": total,
+            "valid_rows": valid,
+            "quality_pct": round(valid / total * 100, 2) if total > 0 else 0.0,
+        })
+
+    dq_df = pd.DataFrame(dq_rows)
+    wr.s3.to_parquet(
+        df=dq_df,
+        path=GOLD_DQ_PATH,
+        dataset=True,
+        partition_cols=["date"],
+        mode="overwrite_partitions",
+    )
+    logger.info(f"Data Quality Score upisan za {date_str}: {len(dq_df)} metrika")
+
+
 def lambda_handler(event, context):
     logger.info(f"Starting HN Silver Layer normalization | event={json.dumps(event)}")
 
@@ -271,6 +308,7 @@ def lambda_handler(event, context):
     df_users, df_posts = cast_types(df_users, df_posts)
 
     save_to_silver(df_users, df_posts)
+    save_data_quality_score(df_users, df_posts, date_str)
 
     result = {
         "status": "completed",
