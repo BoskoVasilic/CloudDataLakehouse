@@ -128,8 +128,8 @@ def lambda_handler(event, context):
 
     logger.info("Pokrenut Twitter Silver normalizer")
 
-    wr.s3.delete_objects(f"{PATH_USERS}platform=X/")
-    wr.s3.delete_objects(PATH_POSTS)
+    # wr.s3.delete_objects(f"{PATH_USERS}platform=X/")
+    # wr.s3.delete_objects(PATH_POSTS)
 
     logger.info(f"Preuzimam s3://{S3_BUCKET}/{BRONZE_KEY} na {TMP_CSV}")
     boto3.client("s3").download_file(S3_BUCKET, BRONZE_KEY, TMP_CSV)
