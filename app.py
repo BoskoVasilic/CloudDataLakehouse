@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import aws_cdk as cdk
+from db_secret_stack.stack import DbSecretStack
 from hacker_news_bronze_stack.stack import DataCollectionStack
 from network_stack.stack import NetworkStack
 from twitter_silver_stack.stack import TwitterSilverStack
@@ -24,11 +25,12 @@ data_collection_stack = DataCollectionStack(
     env=env,
 )
 
+db_secret_stack = DbSecretStack(app, "DbSecretStack", env=env)
 ec2_stack = Ec2Stack(
-    app,
-    "Ec2Stack",
+    app, "Ec2Stack",
     vpc=network_stack.vpc,
     ec2_sg=network_stack.ec2_sg,
+    db_secret=db_secret_stack.db_secret,
     env=env,
 )
 

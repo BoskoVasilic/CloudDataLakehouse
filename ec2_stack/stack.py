@@ -5,6 +5,8 @@ from aws_cdk import (
     aws_iam as iam,
     CfnOutput,
 )
+from aws_cdk import aws_ssm as ssm
+from aws_cdk import custom_resources as cr
 
 
 class Ec2Stack(Stack):
@@ -19,6 +21,7 @@ class Ec2Stack(Stack):
         construct_id: str,
         vpc: ec2.Vpc,
         ec2_sg: ec2.SecurityGroup,
+        db_secret,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -94,3 +97,54 @@ class Ec2Stack(Stack):
             value=f"http://{self.instance.instance_public_ip}:8088",
             description="Apache Superset URL",
         )
+
+        db_secret.grant_read(self.instance.role)
+
+        setup_document = ssm.CfnDocument(
+            self, "PostgresSetupDocument",
+            document_type="Command",
+            content={
+                "schemaVersion": "2.2",
+                "description": "Create lakehouse DB and loader_user",
+                "mainSteps": [{
+                    "action": "aws:runShellScript",
+                    "name": "setupPostgres",
+                    "inputs": {
+                        "runCommand": [
+                            "SECRET=$(aws secretsmanager get-secret-value "
+                            f"--secret-id {db_secret.secret_arn} --region eu-north-1 "
+                            "--query SecretString --output text)",
+                            "DBNAME=$(echo $SECRET | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"dbname\"])')",
+                            "DBUSER=$(echo $SECRET | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"username\"])')",
+                            "DBPASS=$(echo $SECRET | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"password\"])')",
+                            "sudo -u postgres psql -tc \"SELECT 1 FROM pg_database WHERE datname='$DBNAME'\" | grep -q 1 || "
+                            "sudo -u postgres psql -c \"CREATE DATABASE $DBNAME\"",
+                            "sudo -u postgres psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='$DBUSER'\" | grep -q 1 || "
+                            "sudo -u postgres psql -c \"CREATE USER $DBUSER WITH PASSWORD '$DBPASS'\"",
+                            "sudo -u postgres psql -c \"GRANT ALL PRIVILEGES ON DATABASE $DBNAME TO $DBUSER\"",
+                            "sudo sed -i \"s/^#*listen_addresses.*/listen_addresses = '*'/\" /etc/postgresql/*/main/postgresql.conf",
+                            "echo \"host all all 10.0.0.0/16 md5\" | sudo tee -a /etc/postgresql/*/main/pg_hba.conf",
+                            "sudo systemctl restart postgresql",
+                        ]
+                    },
+                }],
+            },
+        )
+
+        run_setup = cr.AwsCustomResource(
+            self, "RunPostgresSetup",
+            on_create=cr.AwsSdkCall(
+                service="SSM",
+                action="sendCommand",
+                parameters={
+                    "DocumentName": setup_document.ref,
+                    "InstanceIds": [self.instance.instance_id],
+                },
+                physical_resource_id=cr.PhysicalResourceId.of("PostgresSetupRun"),
+            ),
+            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+                resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+            ),
+        )
+
+        run_setup.node.add_dependency(setup_document)
