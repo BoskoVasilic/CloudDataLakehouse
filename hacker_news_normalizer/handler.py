@@ -20,9 +20,9 @@ SILVER_BUCKET = os.environ["SILVER_BUCKET_NAME"]
 
 SILVER_USERS_PATH = f"s3://{SILVER_BUCKET}/silver/users/"
 SILVER_POSTS_PATH = f"s3://{SILVER_BUCKET}/silver/posts/"
-GOLD_DQ_PATH = f"s3://{SILVER_BUCKET}/gold/hacker_news/data_quality_score/"
 
 HN_USER_API = "https://hacker-news.firebaseio.com/v0/user/{username}.json"
+HN_ITEM_API = "https://hacker-news.firebaseio.com/v0/item/{item_id}.json"
 
 MAX_WORKERS = 50
 
@@ -95,6 +95,38 @@ def fetch_karma_for_all_users(usernames: list[str]) -> dict[str, dict]:
     return results
 
 
+def fetch_job_score(job_id: str) -> tuple[str, int | None]:
+    url = HN_ITEM_API.format(item_id=job_id)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "HN-Silver-Normalizer/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            if data is None:
+                return job_id, None
+            return job_id, data.get("score")
+    except Exception as e:
+        logger.warning(f"Failed to fetch score for job_id={job_id}: {e}")
+        return job_id, None
+
+
+def fetch_scores_for_jobs(job_ids: list[str]) -> dict[str, int | None]:
+    logger.info(f"Fetching scores for {len(job_ids)} job posts")
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(fetch_job_score, job_id): job_id
+            for job_id in job_ids
+        }
+        for future in as_completed(futures):
+            job_id, score = future.result()
+            results[job_id] = score
+
+    fetched = sum(1 for v in results.values() if v is not None)
+    logger.info(f"Job score fetch: {fetched}/{len(job_ids)} successful")
+    return results
+
+
 def read_bronze_hits(date_str: str) -> list:
     year, month, day = date_str.split("-")
     s3_key = f"bronze/hacker_news/year={year}/month={month}/day={day}/data.json"
@@ -137,6 +169,14 @@ def flatten_children(hit: dict) -> str | None:
 
 
 def build_dataframes(hits: list, karma_map: dict, date_str: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    job_ids = [
+        str(hit.get("objectID"))
+        for hit in hits
+        if "job" in hit.get("_tags", []) and hit.get("objectID")
+    ]
+
+    job_score_map = fetch_scores_for_jobs(job_ids) if job_ids else {}
+
     users_map = {}
     posts_rows = []
 
@@ -155,19 +195,26 @@ def build_dataframes(hits: list, karma_map: dict, date_str: str) -> tuple[pd.Dat
                 "is_verified": None,
                 "followers_count": None,
                 "created_at": user_karma_data.get("created_at"),
+                "first_seen_date": date_str,
             }
 
         post_type  = extract_post_type(hit)
         created_at = epoch_to_utc_iso(hit.get("created_at_i"))
         content    = strip_html(hit.get("text") or hit.get("story_text") or hit.get("comment_text") or hit.get("title") or hit.get("url"))
+        post_id = str(hit.get("objectID") or hit.get("story_id"))
+
+        if post_type == "job":
+            points = job_score_map.get(post_id)
+        else:
+            points = hit.get("points")
 
         posts_rows.append({
-            "post_id":         str(hit.get("objectID") or hit.get("story_id")),
+            "post_id":         post_id,
             "author_username": author,
             "content_text":    content,
             "created_at":      created_at,
             "post_type":       post_type,
-            "points":          hit.get("points"),
+            "points":          points,
             "year":            date_str.split("-")[0],
             "month":           date_str.split("-")[1],
             "day":             date_str.split("-")[2],
@@ -195,6 +242,57 @@ def deduplicate(df_users: pd.DataFrame, df_posts: pd.DataFrame) -> tuple[pd.Data
     return df_users, df_posts
 
 
+def load_existing_users(platform: str) -> pd.DataFrame:
+    path = f"{SILVER_USERS_PATH}"
+    try:
+        df_existing = wr.s3.read_parquet(
+            path=path,
+            dataset=True,
+            partition_filter=lambda x: x["platform"] == platform,
+        )
+        logger.info(f"Loaded {len(df_existing)} existing users for platform={platform}")
+        return df_existing
+    except wr.exceptions.NoFilesFound:
+        logger.info(f"No existing users found for platform={platform}, starting fresh")
+        return pd.DataFrame()
+
+
+def upsert_users(df_existing: pd.DataFrame, df_new: pd.DataFrame) -> pd.DataFrame:
+    if df_existing.empty:
+        logger.info("No existing users, using new users as-is")
+        return df_new
+
+    new_by_username = df_new.set_index("username")
+
+    updated_rows = []
+    for _, existing_row in df_existing.iterrows():
+        username = existing_row["username"]
+        if username in new_by_username.index:
+            new_data = new_by_username.loc[username]
+            existing_row = existing_row.copy()
+            existing_row["karma_score"] = new_data["karma_score"]
+            if pd.isna(existing_row["created_at"]):
+                existing_row["created_at"] = new_data["created_at"]
+        updated_rows.append(existing_row)
+
+    df_updated = pd.DataFrame(updated_rows)
+
+    existing_usernames = set(df_existing["username"])
+    df_brand_new = df_new[~df_new["username"].isin(existing_usernames)]
+
+    if not df_brand_new.empty:
+        logger.info(f"Adding {len(df_brand_new)} brand new users")
+        df_result = pd.concat([df_updated, df_brand_new], ignore_index=True)
+    else:
+        df_result = df_updated
+
+    logger.info(
+        f"Upsert complete: {len(df_existing)} existing + "
+        f"{len(df_brand_new)} new = {len(df_result)} total"
+    )
+    return df_result
+
+
 def cast_types(df_users: pd.DataFrame, df_posts: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     df_users["user_id"]     = df_users["user_id"].astype("string")
@@ -204,6 +302,7 @@ def cast_types(df_users: pd.DataFrame, df_posts: pd.DataFrame) -> tuple[pd.DataF
     df_users["is_verified"] = df_users["is_verified"].astype(object)
     df_users["followers_count"] = df_users["followers_count"].astype(object)
     df_users["created_at"]  = df_users["created_at"].astype("string")
+    df_users["first_seen_date"] = df_users["first_seen_date"].astype("string")
 
     df_posts["post_id"]         = df_posts["post_id"].astype("string")
     df_posts["author_username"] = df_posts["author_username"].astype("string")
@@ -220,6 +319,15 @@ def cast_types(df_users: pd.DataFrame, df_posts: pd.DataFrame) -> tuple[pd.DataF
 
 def save_to_silver(df_users: pd.DataFrame, df_posts: pd.DataFrame):
     if not df_users.empty:
+        df_existing_users = load_existing_users("HackerNews")
+
+        df_users_final = upsert_users(df_existing_users, df_users)
+
+        df_users_final["karma_score"] = pd.array(
+            df_users_final["karma_score"], dtype=pd.Int64Dtype()
+        )
+        df_users_final["platform"] = df_users_final["platform"].astype("string")
+
         logger.info(f"Writing {len(df_users)} users to silver parquet...")
         wr.s3.to_parquet(
             df=df_users,
@@ -240,42 +348,6 @@ def save_to_silver(df_users: pd.DataFrame, df_posts: pd.DataFrame):
             partition_cols=["year", "month", "day"],
         )
         logger.info("Posts written successfully")
-
-
-def save_data_quality_score(df_users: pd.DataFrame, df_posts: pd.DataFrame, date_str: str):
-    dq_rows = []
-
-    for col in ["created_at", "content_text", "post_type"]:
-        total = len(df_posts)
-        valid = int(df_posts[col].notna().sum())
-        dq_rows.append({
-            "date": date_str,
-            "metric_name": f"posts_{col}",
-            "total_rows": total,
-            "valid_rows": valid,
-            "quality_pct": round(valid / total * 100, 2) if total > 0 else 0.0,
-        })
-
-    for col in ["karma_score", "created_at"]:
-        total = len(df_users)
-        valid = int(df_users[col].notna().sum())
-        dq_rows.append({
-            "date": date_str,
-            "metric_name": f"users_{col}",
-            "total_rows": total,
-            "valid_rows": valid,
-            "quality_pct": round(valid / total * 100, 2) if total > 0 else 0.0,
-        })
-
-    dq_df = pd.DataFrame(dq_rows)
-    wr.s3.to_parquet(
-        df=dq_df,
-        path=GOLD_DQ_PATH,
-        dataset=True,
-        partition_cols=["date"],
-        mode="overwrite_partitions",
-    )
-    logger.info(f"Data Quality Score upisan za {date_str}: {len(dq_df)} metrika")
 
 
 def lambda_handler(event, context):
@@ -308,7 +380,6 @@ def lambda_handler(event, context):
     df_users, df_posts = cast_types(df_users, df_posts)
 
     save_to_silver(df_users, df_posts)
-    save_data_quality_score(df_users, df_posts, date_str)
 
     result = {
         "status": "completed",
