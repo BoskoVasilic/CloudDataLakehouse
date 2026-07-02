@@ -328,9 +328,9 @@ def save_to_silver(df_users: pd.DataFrame, df_posts: pd.DataFrame):
         )
         df_users_final["platform"] = df_users_final["platform"].astype("string")
 
-        logger.info(f"Writing {len(df_users)} users to silver parquet...")
+        logger.info(f"Writing {len(df_users_final)} users to silver parquet...")
         wr.s3.to_parquet(
-            df=df_users,
+            df=df_users_final,
             path=SILVER_USERS_PATH,
             dataset=True,
             mode="overwrite_partitions",
