@@ -85,15 +85,48 @@ class DataCollectionStack(Stack):
             resources=[f"{bronze_bucket.bucket_arn}/silver/*"],
         ))
 
-        silver_lambda_role.add_to_policy(iam.PolicyStatement(
-            sid="AllowGoldDQWrite",
-            effect=iam.Effect.ALLOW,
-            actions=["s3:PutObject", "s3:DeleteObject"],
-            resources=[f"{bronze_bucket.bucket_arn}/gold/hacker_news/*"],
-        ))
+        # silver_lambda_role.add_to_policy(iam.PolicyStatement(
+        #     sid="AllowGoldDQWrite",
+        #     effect=iam.Effect.ALLOW,
+        #     actions=["s3:PutObject", "s3:DeleteObject"],
+        #     resources=[f"{bronze_bucket.bucket_arn}/gold/hacker_news/*"],
+        # ))
 
         silver_lambda_role.add_to_policy(iam.PolicyStatement(
             sid="AllowSilverList",
+            effect=iam.Effect.ALLOW,
+            actions=["s3:ListBucket"],
+            resources=[bronze_bucket.bucket_arn],
+        ))
+
+        gold_lambda_role = iam.Role(
+            self, "HNGoldLambdaRole",
+            role_name="hn-gold-lambda-role",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+        )
+
+        gold_lambda_role.add_managed_policy(
+            iam.ManagedPolicy.from_aws_managed_policy_name(
+                "service-role/AWSLambdaBasicExecutionRole"
+            )
+        )
+
+        gold_lambda_role.add_to_policy(iam.PolicyStatement(
+            sid="AllowSilverRead",
+            effect=iam.Effect.ALLOW,
+            actions=["s3:GetObject"],
+            resources=[f"{bronze_bucket.bucket_arn}/silver/*"],
+        ))
+
+        gold_lambda_role.add_to_policy(iam.PolicyStatement(
+            sid="AllowGoldWrite",
+            effect=iam.Effect.ALLOW,
+            actions=["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+            resources=[f"{bronze_bucket.bucket_arn}/gold/*"],
+        ))
+
+        gold_lambda_role.add_to_policy(iam.PolicyStatement(
+            sid="AllowGoldList",
             effect=iam.Effect.ALLOW,
             actions=["s3:ListBucket"],
             resources=[bronze_bucket.bucket_arn],
@@ -132,6 +165,23 @@ class DataCollectionStack(Stack):
             description="Normalizes HN data from S3 bronze layer and writes it to S3 silver layer",
         )
 
+        gold_lambda = _lambda.Function(
+            self, "HNGoldTransformer",
+            function_name="hn-gold-transformer",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="handler.lambda_handler",
+            code=_lambda.Code.from_asset("hacker_news_transformator"),
+            role=gold_lambda_role,
+            timeout=Duration.minutes(10),
+            memory_size=512,
+            layers=[aws_sdk_pandas_layer],
+            environment={
+                "SILVER_BUCKET_NAME": bronze_bucket.bucket_name,
+                "GOLD_BUCKET_NAME": bronze_bucket.bucket_name,
+            },
+            description="Transforms HN data from S3 silver layer and writes it to S3 gold layer",
+        )
+
         daily_schedule = events.Rule(
             self,
             "HNCollectorSchedule",
@@ -155,6 +205,13 @@ class DataCollectionStack(Stack):
             schedule=events.Schedule.cron(minute="0", hour="2", day="*", month="*", year="*"),
         ).add_target(targets.LambdaFunction(silver_lambda))
 
+        events.Rule(
+            self, "GoldSchedule",
+            rule_name="hn-gold-daily",
+            schedule=events.Schedule.cron(
+                minute="0", hour="3", day="*", month="*", year="*"
+            ),
+        ).add_target(targets.LambdaFunction(gold_lambda))
 
         error_topic = sns.Topic(
             self,
@@ -163,7 +220,7 @@ class DataCollectionStack(Stack):
             display_name="Hacker News Collector Error",
         )
 
-        for fn, name in [(hn_collector_lambda, "bronze"), (silver_lambda, "silver")]:
+        for fn, name in [(hn_collector_lambda, "bronze"), (silver_lambda, "silver"), (gold_lambda, "gold")]:
             alarm = cloudwatch.Alarm(
                 self, f"HN{name.capitalize()}ErrorAlarm",
                 alarm_name=f"hn-{name}-lambda-errors",
