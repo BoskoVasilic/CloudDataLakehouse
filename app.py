@@ -6,6 +6,8 @@ from network_stack.stack import NetworkStack
 from twitter_silver_stack.stack import TwitterSilverStack
 from twitter_gold_stack.stack import TwitterGoldStack
 from ec2_stack.stack import Ec2Stack
+from gold_postgres_loader_stack.stack import GoldPostgresLoaderStack
+
 
 app = cdk.App()
 
@@ -41,6 +43,16 @@ TwitterGoldStack(
     app,
     "TwitterGoldStack",
     bronze_bucket_name=f"data-lake-bucket-{cdk.Aws.ACCOUNT_ID}-{cdk.Aws.REGION}",
+    env=env,
+)
+
+GoldPostgresLoaderStack(
+    app,
+    "GoldPostgresLoaderStack",
+    vpc=network_stack.vpc,
+    lambda_sg=network_stack.lambda_sg,
+    gold_bucket_name=f"data-lake-bucket-{cdk.Aws.ACCOUNT_ID}-{cdk.Aws.REGION}",
+    pg_host="13.48.26.83", 
     env=env,
 )
 
