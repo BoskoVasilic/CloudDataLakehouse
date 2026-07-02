@@ -35,9 +35,13 @@ def calc_daily_user_counts(users_df: pd.DataFrame) -> pd.DataFrame:
     df = users_df.copy()
     df["date"] = pd.to_datetime(df["created_at"], errors="coerce").dt.date.astype(str)
     df = df[df["date"].notna() & (df["date"] != "NaT") & (df["date"] != "None")]
-    daily = df.groupby("date").size().reset_index(name="new_users_count")
+
+    daily = df.groupby("date").size().reset_index(name="new_users")
+    daily = daily.sort_values("date").reset_index(drop=True)
+    daily["total_users"] = daily["new_users"].cumsum()
     daily["platform"] = "X"
-    daily = daily[["date", "platform", "new_users_count"]].sort_values("date")
+
+    daily = daily[["date", "platform", "total_users", "new_users"]]
     logger.info(f"daily_user_counts: {len(daily)} redova")
     return daily
 
