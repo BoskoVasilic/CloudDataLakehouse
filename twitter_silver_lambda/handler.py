@@ -23,6 +23,8 @@ EXCEL_EPOCH = pd.Timestamp("1899-12-30", tz="UTC")
 PATH_USERS = f"s3://{S3_BUCKET}/{SILVER_PREFIX}/users/"
 PATH_POSTS = f"s3://{S3_BUCKET}/{SILVER_PREFIX}/posts/"
 
+TWITTER_YEARS = ["2021", "2022", "2023"]
+
 seen_usernames: set = set()
 
 
@@ -84,10 +86,12 @@ def process_chunk(chunk: pd.DataFrame):
         users["user_id"] = [str(uuid.uuid4()) for _ in range(len(users))]
         users["platform"] = "X"
         users["karma_score"] = pd.array([None] * len(users), dtype=pd.Int64Dtype())
+        # X nema koncept "first seen" razlicit od registracije - koristimo created_at
+        users["first_seen_date"] = users["created_at"]
 
         users = users[[
-            "user_id", "username", "platform",
-            "karma_score", "is_verified", "followers_count", "created_at"
+            "user_id", "username", "platform", "karma_score",
+            "is_verified", "followers_count", "created_at", "first_seen_date"
         ]]
     else:
         users = None
@@ -128,8 +132,11 @@ def lambda_handler(event, context):
 
     logger.info("Pokrenut Twitter Silver normalizer")
 
-    # wr.s3.delete_objects(f"{PATH_USERS}platform=X/")
-    # wr.s3.delete_objects(PATH_POSTS)
+    
+    logger.info("Brisem stare X partition-e (users platform=X, posts year=2021/2022/2023)...")
+    wr.s3.delete_objects(f"{PATH_USERS}platform=X/")
+    for y in TWITTER_YEARS:
+        wr.s3.delete_objects(f"{PATH_POSTS}year={y}/")
 
     logger.info(f"Preuzimam s3://{S3_BUCKET}/{BRONZE_KEY} na {TMP_CSV}")
     boto3.client("s3").download_file(S3_BUCKET, BRONZE_KEY, TMP_CSV)
