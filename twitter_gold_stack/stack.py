@@ -6,6 +6,10 @@ from aws_cdk import (
     aws_lambda as _lambda,
     aws_iam as iam,
     aws_s3 as s3,
+    aws_ec2 as ec2,
+    aws_sns as sns,
+    aws_cloudwatch as cloudwatch,
+    aws_cloudwatch_actions as cw_actions,
     CfnOutput,
 )
 
@@ -13,7 +17,7 @@ from aws_cdk import (
 class TwitterGoldStack(Stack):
 
     def __init__(self, scope: Construct, construct_id: str,
-                 bronze_bucket_name: str, **kwargs) -> None:
+                 bronze_bucket_name: str, vpc, lamba_sg, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         bronze_bucket = s3.Bucket.from_bucket_name(
@@ -30,7 +34,7 @@ class TwitterGoldStack(Stack):
 
         lambda_role.add_managed_policy(
             iam.ManagedPolicy.from_aws_managed_policy_name(
-                "service-role/AWSLambdaBasicExecutionRole"
+                "service-role/AWSLambdaVPCAccessExecutionRole"
             )
         )
 
@@ -82,8 +86,29 @@ class TwitterGoldStack(Stack):
             environment={
                 "BRONZE_BUCKET_NAME": bronze_bucket_name,
             },
+            vpc=vpc,
+            security_groups=[lamba_sg],
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             description="Racuna Twitter Gold metrike iz Silver layer-a",
         )
+
+        error_topic = sns.Topic.from_topic_arn(
+            self,
+            "SharedErrorTopic",
+            topic_arn=f"arn:aws:sns:{self.region}:{self.account}:hn-collector-errors",
+        )
+
+        gold_error_alarm = cloudwatch.Alarm(
+            self,
+            "TwitterGoldErrorAlarm",
+            alarm_name="twitter-gold-lambda-errors",
+            metric=twitter_gold_lambda.metric_errors(period=Duration.minutes(15), statistic="Sum"),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        gold_error_alarm.add_alarm_action(cw_actions.SnsAction(error_topic))
 
         CfnOutput(
             self,

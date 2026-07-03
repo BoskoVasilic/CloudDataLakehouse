@@ -36,6 +36,8 @@ TwitterSilverStack(
     app,
     "TwitterSilverStack",
     bronze_bucket_name=f"data-lake-bucket-{cdk.Aws.ACCOUNT_ID}-{cdk.Aws.REGION}",
+    vpc=network_stack.vpc,
+    lamba_sg=network_stack.lambda_sg,
     env=env,
 )
 
@@ -43,6 +45,8 @@ TwitterGoldStack(
     app,
     "TwitterGoldStack",
     bronze_bucket_name=f"data-lake-bucket-{cdk.Aws.ACCOUNT_ID}-{cdk.Aws.REGION}",
+    vpc=network_stack.vpc,
+    lamba_sg=network_stack.lambda_sg,
     env=env,
 )
 
