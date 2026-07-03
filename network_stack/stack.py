@@ -10,7 +10,7 @@ class NetworkStack(Stack):
     """
     - 1 VPC, 1 AZ
     - public subnet  -> EC2 (Postgres + Superset)
-    - private subnet -> Lambdas (HN, Twitter, normalization, transform, notifier)
+    - private subnet -> Lambdas (HN, Twitter, normalization, transform, discord_notifier)
     - NAT Gateway so Lambdas can reach the internet (HN/X APIs)
     - 2 security groups: one for EC2, one for Lambdas
     """
@@ -25,7 +25,7 @@ class NetworkStack(Stack):
             vpc_name="social-medias-vpc",
             ip_addresses=ec2.IpAddresses.cidr("10.0.0.0/16"),
             max_azs=1,
-            nat_gateways=1,
+            nat_gateways=0,
             subnet_configuration=[
                 ec2.SubnetConfiguration(
                     name="PublicSubnet",

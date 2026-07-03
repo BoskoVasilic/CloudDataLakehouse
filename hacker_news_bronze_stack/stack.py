@@ -9,6 +9,8 @@ from aws_cdk import (
     aws_events as events,
     aws_events_targets as targets,
     aws_sns as sns,
+    aws_ec2 as ec2,
+    aws_ssm as ssm,
     aws_sns_subscriptions as subscriptions,
     aws_cloudwatch as cloudwatch,
     aws_cloudwatch_actions as cw_actions,
@@ -18,7 +20,7 @@ from aws_cdk import (
 
 class DataCollectionStack(Stack):
 
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str, vpc, lamba_sg, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         bronze_bucket = s3.Bucket(
@@ -47,7 +49,7 @@ class DataCollectionStack(Stack):
 
         lambda_role.add_managed_policy(
             iam.ManagedPolicy.from_aws_managed_policy_name(
-                "service-role/AWSLambdaBasicExecutionRole"
+                "service-role/AWSLambdaVPCAccessExecutionRole"
             )
         )
 
@@ -68,7 +70,7 @@ class DataCollectionStack(Stack):
 
         silver_lambda_role.add_managed_policy(
             iam.ManagedPolicy.from_aws_managed_policy_name(
-                "service-role/AWSLambdaBasicExecutionRole"
+                "service-role/AWSLambdaVPCAccessExecutionRole"
             )
         )
 
@@ -86,14 +88,40 @@ class DataCollectionStack(Stack):
         ))
 
         silver_lambda_role.add_to_policy(iam.PolicyStatement(
-            sid="AllowGoldDQWrite",
+            sid="AllowSilverList",
             effect=iam.Effect.ALLOW,
-            actions=["s3:PutObject", "s3:DeleteObject"],
-            resources=[f"{bronze_bucket.bucket_arn}/gold/hacker_news/*"],
+            actions=["s3:ListBucket"],
+            resources=[bronze_bucket.bucket_arn],
         ))
 
-        silver_lambda_role.add_to_policy(iam.PolicyStatement(
-            sid="AllowSilverList",
+        gold_lambda_role = iam.Role(
+            self, "HNGoldLambdaRole",
+            role_name="hn-gold-lambda-role",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+        )
+
+        gold_lambda_role.add_managed_policy(
+            iam.ManagedPolicy.from_aws_managed_policy_name(
+                "service-role/AWSLambdaVPCAccessExecutionRole"
+            )
+        )
+
+        gold_lambda_role.add_to_policy(iam.PolicyStatement(
+            sid="AllowSilverRead",
+            effect=iam.Effect.ALLOW,
+            actions=["s3:GetObject"],
+            resources=[f"{bronze_bucket.bucket_arn}/silver/*"],
+        ))
+
+        gold_lambda_role.add_to_policy(iam.PolicyStatement(
+            sid="AllowGoldWrite",
+            effect=iam.Effect.ALLOW,
+            actions=["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+            resources=[f"{bronze_bucket.bucket_arn}/gold/*"],
+        ))
+
+        gold_lambda_role.add_to_policy(iam.PolicyStatement(
+            sid="AllowGoldList",
             effect=iam.Effect.ALLOW,
             actions=["s3:ListBucket"],
             resources=[bronze_bucket.bucket_arn],
@@ -132,6 +160,60 @@ class DataCollectionStack(Stack):
             description="Normalizes HN data from S3 bronze layer and writes it to S3 silver layer",
         )
 
+        gold_lambda = _lambda.Function(
+            self, "HNGoldTransformer",
+            function_name="hn-gold-transformer",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="handler.lambda_handler",
+            code=_lambda.Code.from_asset("hacker_news_transformator"),
+            role=gold_lambda_role,
+            timeout=Duration.minutes(10),
+            memory_size=512,
+            layers=[aws_sdk_pandas_layer],
+            environment={
+                "SILVER_BUCKET_NAME": bronze_bucket.bucket_name,
+                "GOLD_BUCKET_NAME": bronze_bucket.bucket_name,
+            },
+            vpc=vpc,
+            security_groups=[lamba_sg],
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            description="Transforms HN data from S3 silver layer and writes it to S3 gold layer",
+        )
+
+        discord_webhook_param = ssm.StringParameter.from_secure_string_parameter_attributes(
+            self,
+            "DiscordWebhookParam",
+            parameter_name="/hn-pipeline/discord-webhook-url",
+        )
+
+        discord_lambda_role = iam.Role(
+            self, "DiscordNotifierRole",
+            role_name="hn-discord-notifier-role",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+        )
+        discord_lambda_role.add_managed_policy(
+            iam.ManagedPolicy.from_aws_managed_policy_name(
+                "service-role/AWSLambdaBasicExecutionRole"
+            )
+        )
+
+        discord_webhook_param.grant_read(discord_lambda_role)
+
+        discord_notifier_lambda = _lambda.Function(
+            self, "DiscordNotifierFunction",
+            function_name="hn-discord-notifier",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="handler.lambda_handler",
+            code=_lambda.Code.from_asset("discord_notifier"),
+            role=discord_lambda_role,
+            timeout=Duration.seconds(30),
+            memory_size=128,
+            environment={
+                "DISCORD_WEBHOOK_PARAMETER": "/hn-pipeline/discord-webhook-url",
+            },
+            description="Notifies Discord channel about HN data collection",
+        )
+
         daily_schedule = events.Rule(
             self,
             "HNCollectorSchedule",
@@ -155,6 +237,13 @@ class DataCollectionStack(Stack):
             schedule=events.Schedule.cron(minute="0", hour="2", day="*", month="*", year="*"),
         ).add_target(targets.LambdaFunction(silver_lambda))
 
+        events.Rule(
+            self, "GoldSchedule",
+            rule_name="hn-gold-daily",
+            schedule=events.Schedule.cron(
+                minute="0", hour="3", day="*", month="*", year="*"
+            ),
+        ).add_target(targets.LambdaFunction(gold_lambda))
 
         error_topic = sns.Topic(
             self,
@@ -163,7 +252,17 @@ class DataCollectionStack(Stack):
             display_name="Hacker News Collector Error",
         )
 
-        for fn, name in [(hn_collector_lambda, "bronze"), (silver_lambda, "silver")]:
+        error_topic.add_subscription(
+            subscriptions.LambdaSubscription(discord_notifier_lambda)
+        )
+
+        discord_notifier_lambda.add_permission(
+            "AllowSNSInvoke",
+            principal=iam.ServicePrincipal("sns.amazonaws.com"),
+            source_arn=error_topic.topic_arn,
+        )
+
+        for fn, name in [(hn_collector_lambda, "bronze"), (silver_lambda, "silver"), (gold_lambda, "gold")]:
             alarm = cloudwatch.Alarm(
                 self, f"HN{name.capitalize()}ErrorAlarm",
                 alarm_name=f"hn-{name}-lambda-errors",

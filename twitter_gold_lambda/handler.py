@@ -9,10 +9,12 @@ logger.setLevel(logging.INFO)
 S3_BUCKET = os.environ["BRONZE_BUCKET_NAME"]
 SILVER_PREFIX = "silver"
 GOLD_PREFIX = "gold/twitter"
+GOLD_DAILY_USERS_PREFIX = "gold/daily_users_metric"
 
 PATH_USERS = f"s3://{S3_BUCKET}/{SILVER_PREFIX}/users/"
 PATH_POSTS = f"s3://{S3_BUCKET}/{SILVER_PREFIX}/posts/"
 PATH_GOLD  = f"s3://{S3_BUCKET}/{GOLD_PREFIX}"
+PATH_GOLD_DAILY_USERS = f"s3://{S3_BUCKET}/{GOLD_DAILY_USERS_PREFIX}"
 
 
 TWITTER_YEARS = ["2021", "2022", "2023"]
@@ -28,6 +30,20 @@ def save(df: pd.DataFrame, name: str):
     logger.info(f"Upisujem {name} u {path}...")
     wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite")
     logger.info(f"{name} upisan")
+
+
+def save_daily_user_counts(df: pd.DataFrame):
+    
+    path = f"{PATH_GOLD_DAILY_USERS}/"
+    logger.info(f"Upisujem daily_users_metric u {path} (partition_cols=platform,date)...")
+    wr.s3.to_parquet(
+        df=df,
+        path=path,
+        dataset=True,
+        partition_cols=["platform", "date"],
+        mode="overwrite_partitions",
+    )
+    logger.info("daily_users_metric upisan")
 
 
 def calc_daily_user_counts(users_df: pd.DataFrame) -> pd.DataFrame:
@@ -85,7 +101,7 @@ def calc_posts_quality_rows(bucket: str, years: list, post_types: list) -> tuple
         dataset=True,
         partition_filter=lambda x: x["year"] in years,
         columns=POSTS_QUALITY_COLUMNS,
-        chunked=True,  
+        chunked=True,
     )
 
     for chunk in chunks:
@@ -149,6 +165,8 @@ def calc_data_quality_score(users_df: pd.DataFrame, posts_quality_rows: list) ->
 def lambda_handler(event, context):
     logger.info("Pokrenut Twitter Gold calculator")
 
+    # raise Exception("TEST - namerni crash za proveru alarma")
+
     logger.info("Ucitavam silver users (platform=X)...")
     users_df = wr.s3.read_parquet(
         path=PATH_USERS,
@@ -160,17 +178,15 @@ def lambda_handler(event, context):
     daily_df = calc_daily_user_counts(users_df)
     top10_df = calc_top10_by_followers(users_df)
 
-  
     posts_quality_rows, posts_total = calc_posts_quality_rows(
         S3_BUCKET, TWITTER_YEARS, TWITTER_POST_TYPES
     )
     logger.info(f"Ucitano {posts_total} X postova (chunked)")
 
- 
     dq_df = calc_data_quality_score(users_df, posts_quality_rows)
     del users_df
 
-    save(daily_df, "daily_user_counts")
+    save_daily_user_counts(daily_df)
     save(top10_df, "top10_users_by_followers")
     save(dq_df,    "data_quality_score")
 
