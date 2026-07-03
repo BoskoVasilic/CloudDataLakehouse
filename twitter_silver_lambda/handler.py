@@ -132,6 +132,8 @@ def lambda_handler(event, context):
 
     logger.info("Pokrenut Twitter Silver normalizer")
 
+    raise Exception("TEST - namerni crash za proveru alarma")
+
     
     logger.info("Brisem stare X partition-e (users platform=X, posts year=2021/2022/2023)...")
     wr.s3.delete_objects(f"{PATH_USERS}platform=X/")

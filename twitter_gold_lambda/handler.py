@@ -165,6 +165,8 @@ def calc_data_quality_score(users_df: pd.DataFrame, posts_quality_rows: list) ->
 def lambda_handler(event, context):
     logger.info("Pokrenut Twitter Gold calculator")
 
+    raise Exception("TEST - namerni crash za proveru alarma")
+
     logger.info("Ucitavam silver users (platform=X)...")
     users_df = wr.s3.read_parquet(
         path=PATH_USERS,
