@@ -48,13 +48,13 @@ TwitterGoldStack(
     env=env,
 )
 
-GoldPostgresLoaderStack(
-    app,
-    "GoldPostgresLoaderStack",
+gold_loader_stack = GoldPostgresLoaderStack(
+    app, "GoldPostgresLoaderStack",
     vpc=network_stack.vpc,
     lambda_sg=network_stack.lambda_sg,
     gold_bucket_name=f"data-lake-bucket-{cdk.Aws.ACCOUNT_ID}-{cdk.Aws.REGION}",
-    pg_host="13.48.26.83", 
+    db_secret=db_secret_stack.db_secret,
+    ec2_instance=ec2_stack.instance,
     env=env,
 )
 

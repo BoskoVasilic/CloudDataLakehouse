@@ -42,7 +42,6 @@ class Ec2Stack(Stack):
         # User data script - runs on first boot, installs Postgres + Superset
         user_data = ec2.UserData.for_linux()
         user_data.add_commands(
-            # System update
             "apt-get update -y",
             "apt-get upgrade -y",
 
@@ -51,18 +50,27 @@ class Ec2Stack(Stack):
             "systemctl start postgresql",
             "systemctl enable postgresql",
 
-            # Python + pip
-            "apt-get install -y python3-pip python3-venv",
+            # Python + venv (PEP 668 fix)
+            "apt-get install -y python3-pip python3-venv unzip curl",
 
-            # Apache Superset
-            "pip3 install apache-superset",
-            "superset db upgrade",
-            "superset fab create-admin --username admin --firstname Admin "
+            # Superset u venv-u, sa svim paketima koji su nam trebali ručno
+            "python3 -m venv /opt/superset-venv",
+            "/opt/superset-venv/bin/pip install --upgrade pip",
+            "/opt/superset-venv/bin/pip install apache-superset psycopg2-binary rich cachetools",
+
+            # SECRET_KEY config
+            "mkdir -p /etc/superset",
+            f"echo \"SECRET_KEY = '{superset_secret_key}'\" > /etc/superset/superset_config.py",
+            "echo 'export SUPERSET_CONFIG_PATH=/etc/superset/superset_config.py' >> /etc/environment",
+
+            "export SUPERSET_CONFIG_PATH=/etc/superset/superset_config.py",
+            "/opt/superset-venv/bin/superset db upgrade",
+            "/opt/superset-venv/bin/superset fab create-admin --username admin --firstname Admin "
             "--lastname Admin --email admin@example.com --password admin123",
-            "superset init",
+            "/opt/superset-venv/bin/superset init",
 
-            # Start Superset on port 8088
-            "nohup superset run -p 8088 --with-threads --reload --debugger &",
+            "nohup /opt/superset-venv/bin/superset run -h 0.0.0.0 -p 8088 --with-threads "
+            "> /var/log/superset.log 2>&1 &",
         )
 
         # EC2 instance in public subnet
@@ -110,22 +118,28 @@ class Ec2Stack(Stack):
                     "action": "aws:runShellScript",
                     "name": "setupPostgres",
                     "inputs": {
-                        "runCommand": [
-                            "SECRET=$(aws secretsmanager get-secret-value "
-                            f"--secret-id {db_secret.secret_arn} --region eu-north-1 "
-                            "--query SecretString --output text)",
-                            "DBNAME=$(echo $SECRET | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"dbname\"])')",
-                            "DBUSER=$(echo $SECRET | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"username\"])')",
-                            "DBPASS=$(echo $SECRET | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"password\"])')",
-                            "sudo -u postgres psql -tc \"SELECT 1 FROM pg_database WHERE datname='$DBNAME'\" | grep -q 1 || "
-                            "sudo -u postgres psql -c \"CREATE DATABASE $DBNAME\"",
-                            "sudo -u postgres psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='$DBUSER'\" | grep -q 1 || "
-                            "sudo -u postgres psql -c \"CREATE USER $DBUSER WITH PASSWORD '$DBPASS'\"",
-                            "sudo -u postgres psql -c \"GRANT ALL PRIVILEGES ON DATABASE $DBNAME TO $DBUSER\"",
-                            "sudo sed -i \"s/^#*listen_addresses.*/listen_addresses = '*'/\" /etc/postgresql/*/main/postgresql.conf",
-                            "echo \"host all all 10.0.0.0/16 md5\" | sudo tee -a /etc/postgresql/*/main/pg_hba.conf",
-                            "sudo systemctl restart postgresql",
-                        ]
+                    "runCommand": [
+                        "which aws || (sudo apt-get update -y && sudo apt-get install -y unzip curl && "
+                        "curl -s \"https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip\" -o /tmp/awscliv2.zip && "
+                        "cd /tmp && unzip -q -o awscliv2.zip && sudo ./aws/install --update)",
+                        "SECRET=$(aws secretsmanager get-secret-value "
+                        f"--secret-id {db_secret.secret_arn} --region eu-north-1 "
+                        "--query SecretString --output text)",
+                        "DBNAME=$(echo $SECRET | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"dbname\"])')",
+                        "DBUSER=$(echo $SECRET | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"username\"])')",
+                        "DBPASS=$(echo $SECRET | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"password\"])')",
+                        "sudo -u postgres psql -tc \"SELECT 1 FROM pg_database WHERE datname='$DBNAME'\" | grep -q 1 || "
+                        "sudo -u postgres psql -c \"CREATE DATABASE $DBNAME\"",
+                        "sudo -u postgres psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='$DBUSER'\" | grep -q 1 || "
+                        "sudo -u postgres psql -c \"CREATE USER $DBUSER WITH PASSWORD '$DBPASS'\"",
+                        "sudo -u postgres psql -c \"ALTER USER $DBUSER WITH PASSWORD '$DBPASS'\"",
+                        "sudo -u postgres psql -c \"GRANT ALL PRIVILEGES ON DATABASE $DBNAME TO $DBUSER\"",
+                        "sudo -u postgres psql -d $DBNAME -c \"GRANT ALL ON SCHEMA public TO $DBUSER\"",
+                        "sudo sed -i \"s/^#*listen_addresses.*/listen_addresses = '*'/\" /etc/postgresql/*/main/postgresql.conf",
+                        "echo \"host all all 10.0.0.0/16 md5\" | sudo tee -a /etc/postgresql/*/main/pg_hba.conf",
+                        "echo \"host all all 127.0.0.1/32 md5\" | sudo tee -a /etc/postgresql/*/main/pg_hba.conf",
+                        "sudo systemctl restart postgresql",
+                    ],
                     },
                 }],
             },

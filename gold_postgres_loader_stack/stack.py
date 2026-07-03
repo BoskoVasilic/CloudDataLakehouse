@@ -7,6 +7,7 @@ from aws_cdk import (
     aws_ec2 as ec2,
     aws_events as events,
     aws_events_targets as targets,
+    aws_secretsmanager as secretsmanager,
     CfnOutput,
 )
 
@@ -25,10 +26,8 @@ class GoldPostgresLoaderStack(Stack):
         vpc: ec2.Vpc,
         lambda_sg: ec2.SecurityGroup,
         gold_bucket_name: str,
-        pg_host: str,          # EC2 public IP — fill in after EC2 is deployed
-        pg_db: str = "socialmedia",
-        pg_user: str = "superset",
-        pg_password: str = "changeme123",  # TODO: move to Secrets Manager before defense
+        db_secret: secretsmanager.Secret,
+        ec2_instance: ec2.Instance,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -52,7 +51,6 @@ class GoldPostgresLoaderStack(Stack):
                 "service-role/AWSLambdaVPCAccessExecutionRole"
             )
         )
-
         # Read all gold parquet files from S3
         role.add_to_policy(iam.PolicyStatement(
             sid="AllowGoldRead",
@@ -82,14 +80,14 @@ class GoldPostgresLoaderStack(Stack):
             ),
             environment={
                 "GOLD_BUCKET_NAME": gold_bucket_name,
-                "PG_HOST": pg_host,
+                "PG_HOST": ec2_instance.instance_private_ip,
                 "PG_PORT": "5432",
-                "PG_DB": pg_db,
-                "PG_USER": pg_user,
-                "PG_PASSWORD": pg_password,
+                "DB_SECRET_ARN": db_secret.secret_arn,
             },
             description="Loads gold parquet data from S3 into PostgreSQL on EC2",
         )
+
+        db_secret.grant_read(loader_lambda)
 
         # Runs at 04:00 UTC — after HN gold (03:00) and Twitter gold
         events.Rule(

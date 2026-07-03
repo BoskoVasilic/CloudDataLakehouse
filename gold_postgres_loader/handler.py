@@ -1,5 +1,7 @@
 import os
+import json
 import logging
+import boto3
 import psycopg2
 import awswrangler as wr
 import pandas as pd
@@ -10,9 +12,7 @@ logger.setLevel(logging.INFO)
 GOLD_BUCKET = os.environ["GOLD_BUCKET_NAME"]
 PG_HOST     = os.environ["PG_HOST"]
 PG_PORT     = os.environ.get("PG_PORT", "5432")
-PG_DB       = os.environ["PG_DB"]
-PG_USER     = os.environ["PG_USER"]
-PG_PASSWORD = os.environ["PG_PASSWORD"]
+DB_SECRET_ARN = os.environ["DB_SECRET_ARN"]
 
 GOLD_BASE = f"s3://{GOLD_BUCKET}/gold"
 
@@ -30,14 +30,22 @@ TABLES = [
     ("twitter/data_quality_score",          "twitter_data_quality_score"),
 ]
 
+_secrets_client = boto3.client("secretsmanager")
+
+
+def get_db_credentials():
+    resp = _secrets_client.get_secret_value(SecretId=DB_SECRET_ARN)
+    return json.loads(resp["SecretString"])
+
 
 def get_connection():
+    creds = get_db_credentials()
     return psycopg2.connect(
         host=PG_HOST,
         port=PG_PORT,
-        dbname=PG_DB,
-        user=PG_USER,
-        password=PG_PASSWORD,
+        dbname=creds["dbname"],
+        user=creds["username"],
+        password=creds["password"],
         connect_timeout=10,
     )
 
@@ -94,7 +102,7 @@ def lambda_handler(event, context):
     logger.info("Starting gold S3 -> PostgreSQL loader")
 
     conn = get_connection()
-    logger.info(f"Connected to PostgreSQL at {PG_HOST}:{PG_PORT}/{PG_DB}")
+    logger.info(f"Connected to PostgreSQL at {PG_HOST}:{PG_PORT}")
 
     results = {}
 
