@@ -78,7 +78,16 @@ class NetworkStack(Stack):
         self.ec2_sg.add_ingress_rule(
             peer=self.lambda_sg,
             connection=ec2.Port.tcp(5432),
-            description="Postgres access, Lambdas only (gold - postgres loader)",
+            description="Postgres access, Lambdas only (gold to postgres loader)",
+        )
+
+        # VPC endpoint so Lambdas in the private subnet can reach Secrets Manager
+        # without going through the NAT gateway / internet
+        self.secrets_manager_endpoint = self.vpc.add_interface_endpoint(
+            "SecretsManagerEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            security_groups=[self.lambda_sg],
         )
 
         # Outputs so other stacks (HN, Twitter, EC2) can plug into this network
