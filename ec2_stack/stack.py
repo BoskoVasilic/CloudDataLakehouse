@@ -60,7 +60,7 @@ class Ec2Stack(Stack):
 
             # SECRET_KEY config
             "mkdir -p /etc/superset",
-            f"echo \"SECRET_KEY = '{superset_secret_key}'\" > /etc/superset/superset_config.py",
+            f"echo \"SECRET_KEY = '5Q1M7THwPMczMRu43RgHhbQaOTgxF43BxydCzhpPLd3mSzfkZ1Z1fIvP'\" > /etc/superset/superset_config.py",
             "echo 'export SUPERSET_CONFIG_PATH=/etc/superset/superset_config.py' >> /etc/environment",
 
             "export SUPERSET_CONFIG_PATH=/etc/superset/superset_config.py",

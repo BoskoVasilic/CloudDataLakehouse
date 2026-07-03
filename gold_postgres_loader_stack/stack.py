@@ -8,16 +8,14 @@ from aws_cdk import (
     aws_events as events,
     aws_events_targets as targets,
     aws_secretsmanager as secretsmanager,
+    aws_sns as sns,
+    aws_cloudwatch as cloudwatch,
+    aws_cloudwatch_actions as cw_actions,
     CfnOutput,
 )
 
 
 class GoldPostgresLoaderStack(Stack):
-    """
-    Lambda that reads all gold parquet files from S3
-    and loads them into PostgreSQL tables on the EC2 instance.
-    Runs daily at 04:00 UTC (after HN gold at 03:00).
-    """
 
     def __init__(
         self,
@@ -89,7 +87,6 @@ class GoldPostgresLoaderStack(Stack):
 
         db_secret.grant_read(loader_lambda)
 
-        # Runs at 04:00 UTC — after HN gold (03:00) and Twitter gold
         events.Rule(
             self,
             "GoldLoaderSchedule",
@@ -98,5 +95,25 @@ class GoldPostgresLoaderStack(Stack):
                 minute="0", hour="4", day="*", month="*", year="*"
             ),
         ).add_target(targets.LambdaFunction(loader_lambda))
+
+        shared_error_topic = sns.Topic.from_topic_arn(
+            self,
+            "SharedErrorTopic",
+            topic_arn=f"arn:aws:sns:{self.region}:{self.account}:hn-collector-errors",
+        )
+
+        cloudwatch.Alarm(
+            self, "GoldLoaderErrorAlarm",
+            alarm_name="gold-loader-lambda-errors",
+            alarm_description="Gold Postgres Loader Lambda failed",
+            metric=loader_lambda.metric_errors(
+                period=Duration.minutes(15),
+                statistic="Sum",
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        ).add_alarm_action(cw_actions.SnsAction(shared_error_topic))
 
         CfnOutput(self, "LoaderLambdaName", value=loader_lambda.function_name)
