@@ -19,6 +19,8 @@ network_stack = NetworkStack(app, "NetworkStack", env=env)
 data_collection_stack = DataCollectionStack(
     app,
     "DataCollectionStack",
+    vpc=network_stack.vpc,
+    lamba_sg=network_stack.lambda_sg,
     env=env,
 )
 
